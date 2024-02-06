@@ -1,5 +1,4 @@
-use std::sync::Mutex;
-
+use std::{sync::Mutex, time::Duration};
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 
 #[get("/")]
@@ -42,9 +41,20 @@ async fn app_visits(data: web::Data<AppStateWithCounter>) -> impl Responder {
     format!("Visits so far: {counter}")
 }
 
+// Each worker thread processes requests sequentially, so handlers which
+// block the current thread will cause the current thread to stop
+// processing new requests. Thefefore, any long, non-cpu-bound operations
+// (e.g. I/O, database operations, etc.) should be expressed as futures or
+// asynchronous functions.
+#[get("/wait")]
+async fn wait() -> impl Responder {
+    tokio::time::sleep(Duration::from_secs(5)).await; // worker thread will handle other requests
+    HttpResponse::Ok().body("Waited 5 seconds!")
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // `HttpServer` accepts an application faactory instead of an application
+    // `HttpServer` accepts an application factory instead of an application
     // instance. For shared mutable state, the object must be `Send + Sync`.
     // Internally, `web::Data` uses `Arc`, so to avoid creating multiple `Arc`,
     // create state before registering using `.app_data()`
@@ -52,10 +62,13 @@ async fn main() -> std::io::Result<()> {
         counter: Mutex::new(0),
     });
 
+    // Application state doesn't need to be `Send` or `Sync` but application
+    // factories must be `Send + Sync`.
     HttpServer::new(move || {
         App::new()
             .service(hello)
             .service(echo)
+            .service(wait)
             // Register a Responder manually without Actix macros.
             .route("/hey", web::get().to(manual_hello))
             // Register a service within a scope, which adds a prefix to all
@@ -72,6 +85,12 @@ async fn main() -> std::io::Result<()> {
             )
     })
     .bind(("127.0.0.1", 8080))?
+    // `HttpServer` starts a number of HTTP _workers_, by default equal in
+    // number to the number of physical CPUs in the system. This can be
+    // overridden with the `HttpServer::workers()` method.
+    .workers(8)
     .run()
+    // The server must be `await`ed or `spawn`ed to start processing requests
+    // and will run until it receives a shutdown signal `ctrl-c`.
     .await
 }

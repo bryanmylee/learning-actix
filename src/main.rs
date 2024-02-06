@@ -1,5 +1,6 @@
+use actix_web::{error, get, post, web, App, HttpResponse, HttpServer, Responder};
+use serde::Deserialize;
 use std::{sync::Mutex, time::Duration};
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 
 #[get("/")]
 async fn hello() -> impl Responder {
@@ -13,6 +14,17 @@ async fn echo(req_body: String) -> impl Responder {
 
 async fn manual_hello() -> impl Responder {
     HttpResponse::Ok().body("Hi there!")
+}
+
+// Each worker thread processes requests sequentially, so handlers which
+// block the current thread will cause the current thread to stop
+// processing new requests. Thefefore, any long, non-cpu-bound operations
+// (e.g. I/O, database operations, etc.) should be expressed as futures or
+// asynchronous functions.
+#[get("/wait")]
+async fn wait() -> impl Responder {
+    tokio::time::sleep(Duration::from_secs(5)).await; // worker thread will handle other requests
+    HttpResponse::Ok().body("Waited 5 seconds!")
 }
 
 struct AppState {
@@ -41,15 +53,66 @@ async fn app_visits(data: web::Data<AppStateWithCounter>) -> impl Responder {
     format!("Visits so far: {counter}")
 }
 
-// Each worker thread processes requests sequentially, so handlers which
-// block the current thread will cause the current thread to stop
-// processing new requests. Thefefore, any long, non-cpu-bound operations
-// (e.g. I/O, database operations, etc.) should be expressed as futures or
-// asynchronous functions.
-#[get("/wait")]
-async fn wait() -> impl Responder {
-    tokio::time::sleep(Duration::from_secs(5)).await; // worker thread will handle other requests
-    HttpResponse::Ok().body("Waited 5 seconds!")
+#[derive(Deserialize)]
+struct AppPathInfo {
+    user_id: u32,
+    friend: String,
+}
+
+// Request information can be retrieved safely with _extractors_. Actix Web
+// supports up to 12 extractors per handler function, and argument position
+// does not matter.
+//
+// `web::Path` provides information extracted from the request's path. Parts of
+// the path that are extractable ("dynamic segments") are marked with curly
+// braces and retrieved as a tuple in the order of definition.
+//
+// It is also possible to extract path information to a type that implements
+// `serde::Deserialize`.
+#[get("/users/{user_id}/{friend}")]
+async fn app_path(
+    path: web::Path<(u32, String)>,
+    struct_path: web::Path<AppPathInfo>,
+) -> impl Responder {
+    let (user_id, friend) = path.into_inner();
+    _ = struct_path.user_id;
+    _ = struct_path.friend;
+    HttpResponse::Ok().body(format!("Welcome {}, user_id {}!", friend, user_id))
+}
+
+#[derive(Deserialize)]
+struct AppQueryParams {
+    username: String,
+}
+
+// `web::Query` provides extraction functionality for query parameters.
+#[get("/query")]
+async fn app_query(query: web::Query<AppQueryParams>) -> impl Responder {
+    format!("Welcome {}!", query.username)
+}
+
+#[derive(Deserialize)]
+struct AppSubmitInfo {
+    username: String,
+    password: String,
+}
+
+// `web::Json` allows deserialization of a request body into a struct. To
+// extract typed information from a request body, the type `T` must implement
+// `serde::Deserialize`.
+//
+// Some extractors like `web::Json` allow configuration of the extraction process.
+// Pass the configuration object into `.app_data()`. In the case of `web::Json`,
+// use `web::JsonConfig`.
+//
+// URL-Encoded forms can be extracted with `web::Form` and configured with
+// `web::FormConfig`.
+#[post("/submit")]
+async fn app_submit(body: web::Json<AppSubmitInfo>) -> impl Responder {
+    format!(
+        "Submitting for {} with password {}!",
+        body.username, body.password
+    )
 }
 
 #[actix_web::main]
@@ -81,7 +144,21 @@ async fn main() -> std::io::Result<()> {
                     }))
                     .app_data(counter.clone()) // Internally `Arc`.
                     .service(app_index)
-                    .service(app_visits),
+                    .service(app_visits)
+                    .service(app_path)
+                    .service(app_query)
+                    .app_data(
+                        web::JsonConfig::default()
+                            .limit(4096)
+                            .error_handler(|err, _req| {
+                                error::InternalError::from_response(
+                                    err,
+                                    HttpResponse::Conflict().finish(),
+                                )
+                                .into()
+                            }),
+                    )
+                    .service(app_submit),
             )
     })
     .bind(("127.0.0.1", 8080))?

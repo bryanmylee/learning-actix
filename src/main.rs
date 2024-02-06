@@ -1,5 +1,7 @@
-use actix_web::{error, get, post, web, App, HttpResponse, HttpServer, Responder};
-use serde::Deserialize;
+use actix_web::{
+    body::BoxBody, error, get, http::header::ContentType, post, web, App, Error, HttpResponse, HttpServer, Responder
+};
+use serde::{Deserialize, Serialize};
 use std::{sync::Mutex, time::Duration};
 
 #[get("/")]
@@ -115,6 +117,44 @@ async fn app_submit(body: web::Json<AppSubmitInfo>) -> impl Responder {
     )
 }
 
+// To return a custom type directly from a handler function, it needs to
+// implement the `Responder` trait.
+#[derive(Serialize)]
+struct AppResponse {
+    username: String,
+}
+
+impl Responder for AppResponse {
+    type Body = BoxBody;
+
+    fn respond_to(self, _req: &actix_web::HttpRequest) -> HttpResponse<Self::Body> {
+        let body = serde_json::to_string(&self).unwrap();
+
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .body(body)
+    }
+}
+
+#[get("/profile/{username}")]
+async fn app_profile(username: web::Path<String>) -> impl Responder {
+    AppResponse { username: username.to_string() }
+}
+
+use futures::{future, stream};
+
+// The response body can also be generated asynchronously. In this case,
+// the body must implement `Stream<Item = Result<Bytes, Error>>` and the
+// response is called with `.streaming()`.
+#[get("/stream")]
+async fn app_stream() -> impl Responder {
+    let body = stream::once(future::ok::<_, Error>(web::Bytes::from_static(b"streamed body")));
+
+    HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .streaming(body)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // `HttpServer` accepts an application factory instead of an application
@@ -158,7 +198,8 @@ async fn main() -> std::io::Result<()> {
                                 .into()
                             }),
                     )
-                    .service(app_submit),
+                    .service(app_submit)
+                    .service(app_profile),
             )
     })
     .bind(("127.0.0.1", 8080))?
